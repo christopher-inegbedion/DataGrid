@@ -1,0 +1,17 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests (layout maths, macOS)
+        run: swift test
+      - name: Build and test on an iOS simulator
+        run: |
+          DEST=$(xcrun simctl list devices available | grep -m1 -oE 'iPhone [0-9]+[^(]*' | sed 's/ *$//')
+          xcodebuild test -scheme DataGrid -destination "platform=iOS Simulator,name=$DEST"
