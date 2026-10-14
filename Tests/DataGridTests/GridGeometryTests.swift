@@ -1,3 +1,4 @@
+import CoreGraphics
 import Testing
 @testable import DataGrid
 
@@ -79,5 +80,68 @@ import Testing
     @Test func negativeInputsAreClamped() {
         let n = GridGeometry(rowCount: -5, rowHeight: -3, columnWidths: [-10, 20])
         #expect(n.rowCount == 0 && n.rowHeight == 1 && n.columnWidths == [0, 20])
+    }
+}
+
+@Suite struct VariableRowHeightTests {
+    // rows: 0..<30, 30..<90, 90..<120, 120..<180, 180..<200   (heights 30, 60, 30, 60, 20)
+    let g = GridGeometry(rowCount: 5, rowHeights: .variable([30, 60, 30, 60, 20]), columnWidths: [100])
+
+    @Test func positionsAreRunningTotals() {
+        #expect(g.contentHeight == 200)
+        #expect([0, 1, 2, 3, 4].map(g.minY(ofRow:)) == [0, 30, 90, 120, 180])
+        #expect([0, 1, 2, 3, 4].map(g.height(ofRow:)) == [30, 60, 30, 60, 20])
+    }
+
+    @Test func rowLookupIsExactAtBoundaries() {
+        #expect(g.row(atY: 0) == 0)
+        #expect(g.row(atY: 29.9) == 0)
+        #expect(g.row(atY: 30) == 1)
+        #expect(g.row(atY: 89.9) == 1)
+        #expect(g.row(atY: 90) == 2)
+        #expect(g.row(atY: 199.9) == 4)
+        #expect(g.row(atY: 200) == nil)
+        #expect(g.row(atY: -1) == nil)
+    }
+
+    @Test func visibleRows() {
+        #expect(g.visibleRows(minY: 0, height: 50, overscan: 0) == 0..<2)
+        #expect(g.visibleRows(minY: 30, height: 60, overscan: 0) == 1..<2)
+        #expect(g.visibleRows(minY: 85, height: 40, overscan: 0) == 1..<4)
+        #expect(g.visibleRows(minY: 0, height: 10_000, overscan: 0) == 0..<5)
+        #expect(g.visibleRows(minY: 150, height: 100, overscan: 0) == 3..<5)
+        #expect(g.visibleRows(minY: 85, height: 40, overscan: 1) == 0..<5)
+    }
+
+    @Test func overscrollIsClamped() {
+        #expect(g.visibleRows(minY: -50, height: 60, overscan: 0) == 0..<1)  // only 10 pt of the band is on the grid
+        #expect(g.visibleRows(minY: 500, height: 60, overscan: 0) == 4..<5)
+    }
+
+    @Test func fewerHeightsThanRowsRepeatTheLast() {
+        let short = GridGeometry(rowCount: 4, rowHeights: .variable([10, 20]), columnWidths: [10])
+        #expect(short.contentHeight == 70)  // 10, 20, then the last height (20) twice
+        let none = GridGeometry(rowCount: 2, rowHeights: .variable([]), columnWidths: [10])
+        #expect(none.contentHeight == 80)
+    }
+
+    @Test func nonPositiveHeightsAreClamped() {
+        let z = GridGeometry(rowCount: 2, rowHeights: .variable([0, -5]), columnWidths: [10])
+        #expect(z.contentHeight == 2)
+    }
+
+    @Test func aHundredThousandRowsStayFast() {
+        let heights = (0..<100_000).map { CGFloat(30 + $0 % 3 * 10) }
+        let big = GridGeometry(rowCount: 100_000, rowHeights: .variable(heights), columnWidths: [100])
+        let mid = big.minY(ofRow: 60_000)
+        #expect(big.row(atY: mid) == 60_000)
+        #expect(big.row(atY: mid - 0.01) == 59_999)
+        let v = big.visibleRows(minY: mid, height: 800, overscan: 0)
+        #expect(v.lowerBound == 60_000 && v.count > 15 && v.count < 30)
+    }
+
+    @Test func literalsMeanEqualHeights() {
+        let eq = GridGeometry(rowCount: 10, rowHeights: 44, columnWidths: [10])
+        #expect(eq.contentHeight == 440 && eq.height(ofRow: 3) == 44)
     }
 }

@@ -9,14 +9,33 @@ import CoreGraphics
 /// what keeps a grid of 100,000 rows as cheap as a grid of 100.
 public struct GridGeometry: Equatable, Sendable {
     public let rowCount: Int
+    /// The height of every row when they are all equal; for variable heights, the average (use ``height(ofRow:)``).
     public let rowHeight: CGFloat
     public let columnWidths: [CGFloat]
     /// `columnOffsets[c]` is the x of column `c`'s left edge; the last entry is the total width.
     private let columnOffsets: [CGFloat]
+    /// `rowOffsets[r]` is the y of row `r`'s top edge, for variable heights; nil when rows are equal.
+    private let rowOffsets: [CGFloat]?
 
     public init(rowCount: Int, rowHeight: CGFloat, columnWidths: [CGFloat]) {
+        self.init(rowCount: rowCount, rowHeights: .uniform(rowHeight), columnWidths: columnWidths)
+    }
+
+    public init(rowCount: Int, rowHeights: RowHeights, columnWidths: [CGFloat]) {
         self.rowCount = max(0, rowCount)
-        self.rowHeight = max(1, rowHeight)
+        switch rowHeights.storage {
+        case .uniform(let h):
+            self.rowHeight = max(1, h)
+            self.rowOffsets = nil
+        case .variable(let heights):
+            let fallback = max(1, heights.last ?? 40)
+            var offsets = [CGFloat](repeating: 0, count: self.rowCount + 1)
+            for r in 0..<self.rowCount {
+                offsets[r + 1] = offsets[r] + (r < heights.count ? max(1, heights[r]) : fallback)
+            }
+            self.rowOffsets = offsets
+            self.rowHeight = self.rowCount > 0 ? offsets[self.rowCount] / CGFloat(self.rowCount) : fallback
+        }
         self.columnWidths = columnWidths.map { max(0, $0) }
         var offsets = [CGFloat](repeating: 0, count: columnWidths.count + 1)
         for (i, w) in self.columnWidths.enumerated() { offsets[i + 1] = offsets[i] + w }
@@ -25,10 +44,11 @@ public struct GridGeometry: Equatable, Sendable {
 
     public var columnCount: Int { columnWidths.count }
     public var contentWidth: CGFloat { columnOffsets.last ?? 0 }
-    public var contentHeight: CGFloat { CGFloat(rowCount) * rowHeight }
+    public var contentHeight: CGFloat { rowOffsets?.last ?? CGFloat(rowCount) * rowHeight }
 
     public func minX(ofColumn column: Int) -> CGFloat { columnOffsets[column] }
-    public func minY(ofRow row: Int) -> CGFloat { CGFloat(row) * rowHeight }
+    public func minY(ofRow row: Int) -> CGFloat { rowOffsets?[row] ?? CGFloat(row) * rowHeight }
+    public func height(ofRow row: Int) -> CGFloat { rowOffsets.map { $0[row + 1] - $0[row] } ?? rowHeight }
 
     /// The column containing `x`, or nil outside the grid.
     public func column(atX x: CGFloat) -> Int? {
@@ -48,14 +68,26 @@ public struct GridGeometry: Equatable, Sendable {
     /// The row containing `y`, or nil outside the grid.
     public func row(atY y: CGFloat) -> Int? {
         guard y >= 0, y < contentHeight else { return nil }
-        return min(rowCount - 1, Int(y / rowHeight))
+        guard let offsets = rowOffsets else { return min(rowCount - 1, Int(y / rowHeight)) }
+        var low = 0, high = rowCount - 1
+        while low < high {  // last offset <= y
+            let mid = (low + high + 1) / 2
+            if offsets[mid] <= y { low = mid } else { high = mid - 1 }
+        }
+        return low
     }
 
     /// Rows touching the band `[minY, minY + height)`, widened by `overscan` rows each side.
     public func visibleRows(minY: CGFloat, height: CGFloat, overscan: Int = 2) -> Range<Int> {
         guard rowCount > 0, height > 0 else { return 0..<0 }
-        let first = Int((max(0, minY) / rowHeight).rounded(.down))
-        let last = Int(((minY + height) / rowHeight).rounded(.up))
+        let first: Int, last: Int
+        if rowOffsets != nil {
+            first = row(atY: max(0, minY)) ?? rowCount - 1
+            last = (minY + height >= contentHeight) ? rowCount : (row(atY: (minY + height).nextDown).map { $0 + 1 } ?? rowCount)
+        } else {
+            first = Int((max(0, minY) / rowHeight).rounded(.down))
+            last = Int(((minY + height) / rowHeight).rounded(.up))
+        }
         let lo = min(rowCount, max(0, first - overscan))
         let hi = min(rowCount, max(lo, last + overscan))
         return lo..<hi

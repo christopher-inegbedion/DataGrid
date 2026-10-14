@@ -10,6 +10,42 @@ import XCTest
 final class HostedGridTests: XCTestCase {
     final class Probe: @unchecked Sendable {
         var built = Set<GridPosition>()
+        var requestScroll: ((GridScrollRequest) -> Void)?
+    }
+
+    /// A grid whose scroll request can be set from the test, as an app's button would.
+    struct ScrollHost: View {
+        let probe: Probe
+        let rows: Int
+        let heights: RowHeights
+        @State private var request: GridScrollRequest?
+
+        var body: some View {
+            DataGrid(rows: rows, columnWidths: .constant(Array(repeating: 100, count: 40)),
+                     rowHeights: heights, scrollTo: $request) { r, c in
+                Color.white.overlay(Text("\(r),\(c)").font(.caption))
+                    .onAppear { probe.built.insert(GridPosition(row: r, column: c)) }
+            } columnHeader: { _ in
+                Color.red
+            } rowHeader: { _ in
+                Color.blue
+            } corner: {
+                Color.blue
+            }
+            .onAppear { probe.requestScroll = { request = $0 } }
+        }
+    }
+
+    private func host(rows: Int, heights: RowHeights = 40, probe: Probe) -> UIWindow {
+        let controller = UIHostingController(rootView: ScrollHost(probe: probe, rows: rows, heights: heights)
+            .environment(\.colorScheme, .light))
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow()
+        window.frame = CGRect(origin: .zero, size: size)
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        settle()
+        return window
     }
 
     private let size = CGSize(width: 390, height: 700)
@@ -121,6 +157,84 @@ final class HostedGridTests: XCTestCase {
         scroll.setContentOffset(maxOffset, animated: false)
         settle()
         XCTAssertTrue(probe.built.contains(GridPosition(row: 499, column: 39)), "the bottom-right cell should be built")
+    }
+
+    // MARK: v0.2
+
+    func testVariableRowHeightsPinAndVirtualize() throws {
+        let probe = Probe()
+        let heights = (0..<100_000).map { CGFloat(30 + $0 % 3 * 20) }
+        let window = host(rows: 100_000, heights: .variable(heights), probe: probe)
+        let scroll = try XCTUnwrap(scrollView(in: window))
+        let geometry = GridGeometry(rowCount: 100_000, rowHeights: .variable(heights), columnWidths: [100])
+        let y: CGFloat = 1_000_000
+        scroll.setContentOffset(CGPoint(x: 250, y: y), animated: false)
+        settle()
+        let expected = try XCTUnwrap(geometry.row(atY: y))
+        XCTAssertTrue(probe.built.contains { abs($0.row - expected) <= 12 }, "rows near \(expected) should exist")
+        XCTAssertLessThan(probe.built.count, 2_000)
+        let top = window.safeAreaInsets.top
+        let at = paint(of: window)
+        XCTAssertEqual(at(CGPoint(x: 250, y: top + 20)), .red)
+        XCTAssertEqual(at(CGPoint(x: 28, y: top + 300)), .blue)
+        XCTAssertEqual(scroll.contentSize.height, 40 + geometry.contentHeight, accuracy: 1)
+    }
+
+    func testScrollToACell() throws {
+        let probe = Probe()
+        let window = host(rows: 100_000, probe: probe)
+        let scroll = try XCTUnwrap(scrollView(in: window))
+        let inset = scroll.adjustedContentInset
+
+        probe.requestScroll?(GridScrollRequest(row: 50_000, column: 20))
+        settle()
+        XCTAssertEqual(scroll.contentOffset.x + inset.left, 20 * 100, accuracy: 1)
+        XCTAssertEqual(scroll.contentOffset.y + inset.top, 50_000 * 40, accuracy: 1)
+        XCTAssertTrue(probe.built.contains(GridPosition(row: 50_000, column: 20)))
+    }
+
+    func testScrollingOneAxisKeepsTheOther() throws {
+        let probe = Probe()
+        let window = host(rows: 100_000, probe: probe)
+        let scroll = try XCTUnwrap(scrollView(in: window))
+        let inset = scroll.adjustedContentInset
+        probe.requestScroll?(GridScrollRequest(row: 1_000, column: 10))
+        settle()
+        probe.requestScroll?(GridScrollRequest(row: 2_000))
+        settle()
+        XCTAssertEqual(scroll.contentOffset.x + inset.left, 1_000, accuracy: 1, "column should not move")
+        XCTAssertEqual(scroll.contentOffset.y + inset.top, 80_000, accuracy: 1)
+        probe.requestScroll?(GridScrollRequest(column: 25))
+        settle()
+        XCTAssertEqual(scroll.contentOffset.x + inset.left, 2_500, accuracy: 1)
+        XCTAssertEqual(scroll.contentOffset.y + inset.top, 80_000, accuracy: 1, "row should not move")
+    }
+
+    func testTheSameRequestWorksAgainAfterScrollingAway() throws {
+        let probe = Probe()
+        let window = host(rows: 100_000, probe: probe)
+        let scroll = try XCTUnwrap(scrollView(in: window))
+        let inset = scroll.adjustedContentInset
+        probe.requestScroll?(GridScrollRequest(row: 500))
+        settle()
+        scroll.setContentOffset(CGPoint(x: 0, y: 9_000_000 - inset.top), animated: false)
+        settle()
+        probe.requestScroll?(GridScrollRequest(row: 500))
+        settle()
+        XCTAssertEqual(scroll.contentOffset.y + inset.top, 20_000, accuracy: 1)
+    }
+
+    func testOutOfRangeRequestsClampInsteadOfCrashing() throws {
+        let probe = Probe()
+        let window = host(rows: 1_000, probe: probe)
+        let scroll = try XCTUnwrap(scrollView(in: window))
+        probe.requestScroll?(GridScrollRequest(row: 10_000_000, column: 9_999))
+        settle()
+        XCTAssertTrue(probe.built.contains(GridPosition(row: 999, column: 39)), "the last cell should be reachable")
+        XCTAssertLessThanOrEqual(scroll.contentOffset.y, scroll.contentSize.height)
+        probe.requestScroll?(GridScrollRequest(row: -5, column: -5))
+        settle()
+        XCTAssertEqual(scroll.contentOffset.y + scroll.adjustedContentInset.top, 0, accuracy: 1)
     }
 
     /// Writes docs/screenshot.png when SNAPSHOT_DIR is set (used for the README); otherwise a no-op.
